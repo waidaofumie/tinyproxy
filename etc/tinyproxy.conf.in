@@ -3,7 +3,7 @@
 ##
 ## This example tinyproxy.conf file contains example settings
 ## with explanations in comments. For decriptions of all
-## parameters, see the tinproxy.conf(5) manual page.
+## parameters, see the tinyproxy.conf(5) manual page.
 ##
 
 #
@@ -124,7 +124,7 @@ LogLevel Info
 # can be used for signalling purposes.
 # If not specified, no pidfile will be written.
 #
-#PidFile "@localstatedir@/run/tinyproxy/tinyproxy.pid"
+#PidFile "@runstatedir@/tinyproxy/tinyproxy.pid"
 
 #
 # XTinyproxy: Tell Tinyproxy to include the X-Tinyproxy header, which
@@ -204,6 +204,13 @@ Allow ::1
 # If there are any entries specified, access is only granted for authenticated
 # users.
 #BasicAuth user password
+
+# BasicAuthRealm : In case BasicAuth is configured, the "realm" information.
+# "Proxy Authentication Required" status http 407 "error-response" can be
+# customized.
+#
+# - defaults in code to "Tinyproxy" (PACKAGE_NAME), if not configured.
+#BasicAuthRealm "Tinyproxy"
 
 #
 # AddHeader: Adds the specified headers to outgoing HTTP requests that
@@ -320,6 +327,3 @@ ViaProxyName "tinyproxy"
 # If not set then no rewriting occurs.
 #
 #ReverseBaseURL "http://localhost:8888/"
-
-
-

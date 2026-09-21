@@ -80,9 +80,10 @@ static int resize(struct htab *htab, size_t nel)
 {
 	size_t newsize;
 	size_t i, j;
+	size_t oldmask = htab->mask;
 	struct elem *e, *newe;
 	struct elem *oldtab = htab->elems;
-	struct elem *oldend = htab->elems + htab->mask + 1;
+	struct elem *oldend;
 
 	if (nel > MAXSIZE)
 		nel = MAXSIZE;
@@ -95,6 +96,8 @@ static int resize(struct htab *htab, size_t nel)
 	htab->mask = newsize - 1;
 	if (!oldtab)
 		return 1;
+
+	oldend = oldtab + oldmask + 1;
 	for (e = oldtab; e < oldend; e++)
 		if (e->item.key) {
 			for (i=e->hash,j=1; ; i+=j++) {
@@ -125,11 +128,14 @@ static struct elem *lookup(struct htab *htab, const char *key, size_t hash, size
 struct htab *htab_create(size_t nel)
 {
 	struct htab *r = calloc(1, sizeof *r);
-	if(r && !resize(r, nel)) {
-		free(r);
-		r = 0;
+	if(r) {
+		if(resize(r, nel))
+			r->seed = rand();
+		else {
+			free(r);
+			r = 0;
+		}
 	}
-	r->seed = rand();
 	return r;
 }
 

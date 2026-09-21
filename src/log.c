@@ -165,12 +165,8 @@ void log_message (int level, const char *fmt, ...)
 
         if (config->syslog) {
                 pthread_mutex_lock(&log_mutex);
-#ifdef HAVE_VSYSLOG_H
-                vsyslog (level, fmt, args);
-#else
                 vsnprintf (str, STRING_LENGTH, fmt, args);
                 syslog (level, "%s", str);
-#endif
                 pthread_mutex_unlock(&log_mutex);
         } else {
                 char *p;
@@ -246,15 +242,18 @@ static void send_stored_logs (void)
 
 #ifdef NDEBUG
                 if (log_level == LOG_CONN && level == LOG_INFO)
-                        continue;
+                        goto next;
                 else if (log_level == LOG_INFO) {
                         if (level > LOG_INFO && level != LOG_CONN)
-                                continue;
+                                goto next;
                 } else if (level > log_level)
-                        continue;
+                        goto next;
 #endif
 
                 log_message (level, "%s", ptr);
+#ifdef NDEBUG
+next:
+#endif
                 safefree(*string);
         }
 

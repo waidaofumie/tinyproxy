@@ -146,7 +146,7 @@ AC_CHECK_HEADERS([sys/ioctl.h alloca.h memory.h malloc.h sysexits.h \
 dnl Checks for libary functions
 AC_FUNC_LSTAT_FOLLOWS_SLASHED_SYMLINK
 
-AC_CHECK_FUNCS([strlcpy strlcat setgroups])
+AC_CHECK_FUNCS([strlcpy setgroups])
 
 dnl Enable extra warnings
 DESIRED_FLAGS="-fdiagnostics-show-option -Wall -Wextra -Wno-unused-parameter -Wmissing-prototypes -Wstrict-prototypes -Wmissing-declarations -Wfloat-equal -Wundef -Wformat=2 -Wlogical-op -Wmissing-include-dirs -Wformat-nonliteral -Wold-style-definition -Wpointer-arith -Waggregate-return -Winit-self -Wpacked --std=c89 -ansi -Wno-overlength-strings -Wno-long-long -Wno-overlength-strings -Wdeclaration-after-statement -Wredundant-decls -Wmissing-noreturn -Wshadow -Wendif-labels -Wcast-qual -Wcast-align -Wwrite-strings -Wp,-D_FORTIFY_SOURCE=2 -fno-common"
@@ -173,6 +173,9 @@ fi
 dnl
 dnl Substitute the variables into the various Makefiles
 dnl
+# runstatedir isn't available for Autoconf < 2.70
+AS_IF([test -z "${runstatedir}"], [runstatedir='${localstatedir}/run'])
+AC_SUBST([runstatedir])
 AC_SUBST(CFLAGS)
 AC_SUBST(LDFLAGS)
 AC_SUBST(CPPFLAGS)
@@ -194,20 +197,21 @@ fi #manpage_support_enabled
 AM_CONDITIONAL(HAVE_POD2MAN, test "x$POD2MAN" != "x" -a "x$POD2MAN" != "xno")
 
 AC_PATH_PROG(GPERF, gperf, no)
-AM_CONDITIONAL(HAVE_GPERF, test "x$GPERF" != "x" -a "x$GPERF" != "xno")
 AH_TEMPLATE([HAVE_GPERF],
 	    [Whether you have gperf installed for faster config parsing.])
 
+tmp_gperf=false
 if test "x$GPERF" != "x" -a "x$GPERF" != "xno" ; then
   AS_ECHO_N(["checking whether gperf is recent enough... "])
   if "$GPERF" < src/conf-tokens.gperf >/dev/null 2>&1 ; then
     AS_ECHO("yes")
     AC_DEFINE(HAVE_GPERF)
+    tmp_gperf=true
   else
-    AM_CONDITIONAL(HAVE_GPERF, false)
     AS_ECHO("no")
   fi
 fi
+AM_CONDITIONAL(HAVE_GPERF, $tmp_gperf)
 
 AC_CONFIG_FILES([
 Makefile
@@ -219,7 +223,6 @@ docs/Makefile
 docs/man5/Makefile
 docs/man5/tinyproxy.conf.txt
 docs/man8/Makefile
-docs/man8/tinyproxy.txt
 m4macros/Makefile
 tests/Makefile
 tests/scripts/Makefile
@@ -243,4 +246,8 @@ if test "x$POD2MAN" = "xno" ; then
   if test -e docs/man8/tinyproxy.8 ; then
       touch docs/man8/tinyproxy.8
   fi
+fi
+
+if test "x$HAVE_GPERF" = "xno" && test -e src/conf-tokens-gperf.inc ; then
+  touch src/conf-tokens-gperf.inc
 fi

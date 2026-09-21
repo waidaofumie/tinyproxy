@@ -66,9 +66,10 @@
 #define PASSWORD "([^@]*)"
 #define IP "((([0-9]{1,3})\\.){3}[0-9]{1,3})"
 #define IPMASK "(" IP "(/" DIGIT "+)?)"
+#define IPV6SCOPE "((%[^ \t\\/]{1,16})?)"
 #define IPV6 "(" \
-        "(([0-9a-f:]{2,39}))|" \
-        "(([0-9a-f:]{0,29}:" IP "))" \
+        "([0-9a-f:]{2,39})" IPV6SCOPE "|" \
+        "([0-9a-f:]{0,29}:" IP ")" IPV6SCOPE \
         ")"
 
 #define IPV6MASK "(" IPV6 "(/" DIGIT "+)?)"
@@ -80,7 +81,7 @@
  * number.  Given the usual structure of the configuration file, sixteen
  * substring matches should be plenty.
  */
-#define RE_MAX_MATCHES 24
+#define RE_MAX_MATCHES 33
 
 #define CP_WARN(FMT, ...) \
         log_message (LOG_WARNING, "line %lu: " FMT, lineno, __VA_ARGS__)
@@ -121,6 +122,7 @@ static HANDLE_FUNC (handle_disabled_feature)
 
 static HANDLE_FUNC (handle_allow);
 static HANDLE_FUNC (handle_basicauth);
+static HANDLE_FUNC (handle_basicauthrealm);
 static HANDLE_FUNC (handle_anonymous);
 static HANDLE_FUNC (handle_bind);
 static HANDLE_FUNC (handle_bindsame);
@@ -192,6 +194,7 @@ struct {
         regex_t *cre;
 } directives[] = {
         /* string arguments */
+        STDCONF (basicauthrealm, STR, handle_basicauthrealm),
         STDCONF (logfile, STR, handle_logfile),
         STDCONF (pidfile, STR, handle_pidfile),
         STDCONF (anonymous, STR, handle_anonymous),
@@ -224,7 +227,7 @@ struct {
                  handle_deny),
         STDCONF (bind, "(" IP "|" IPV6 ")", handle_bind),
         /* other */
-        STDCONF (basicauth, ALNUM WS ALNUM, handle_basicauth),
+        STDCONF (basicauth, USERNAME WS PASSWORD, handle_basicauth),
         STDCONF (errorfile, INT WS STR, handle_errorfile),
         STDCONF (addheader,  STR WS STR, handle_addheader),
 
@@ -249,7 +252,7 @@ struct {
                  "(" "(none)" WS STR ")|" \
                  "(" "(http|socks4|socks5)" WS \
                      "(" USERNAME /*username*/ ":" PASSWORD /*password*/ "@" ")?"
-                     "(" IP "|" ALNUM ")"
+                     "(" IP "|" "\\[(" IPV6 ")\\]" "|" ALNUM ")"
                      ":" INT "(" WS STR ")?" ")", handle_upstream),
 #endif
         /* loglevel */
@@ -293,6 +296,7 @@ void free_config (struct config_s *conf)
         char *k;
         htab_value *v;
         size_t it;
+        safefree (conf->basicauth_realm);
         safefree (conf->logf_name);
         safefree (conf->stathost);
         safefree (conf->user);
@@ -422,12 +426,12 @@ static int config_parse (struct config_s *conf, FILE * f)
         unsigned long lineno = 1;
 
         for (;fgets (buffer, sizeof (buffer), f);++lineno) {
-                if(buffer[0] == '#') continue;
                 p = buffer;
                 while(isspace(*p))p++;
-                if(!*p) continue;
+                /* skip empty lines and comments, which may be indented */
+                if(!*p || *p == '#') continue;
                 q = p;
-                while(!isspace(*q))q++;
+                while(*q && !isspace(*q))q++;
                 c = *q;
                 *q = 0;
                 e = config_directive_find(p, strlen(p));
@@ -480,6 +484,7 @@ static void initialize_config_defaults (struct config_s *conf)
          * (FIXME: Should have a better API for all this)
          */
         conf->errorpages = NULL;
+        conf->basicauth_realm = safestrdup (PACKAGE_NAME);
         conf->stathost = safestrdup (TINYPROXY_STATHOST);
         conf->idletimeout = MAX_IDLE_TIME;
         conf->logf_name = NULL;
@@ -632,6 +637,11 @@ set_int_arg (unsigned int *var, const char *line, regmatch_t * match)
  * values to return.
  *
  ***********************************************************************/
+
+static HANDLE_FUNC (handle_basicauthrealm)
+{
+        return set_string_arg (&conf->basicauth_realm, line, &match[2]);
+}
 
 static HANDLE_FUNC (handle_logfile)
 {
@@ -1008,7 +1018,7 @@ static HANDLE_FUNC (handle_filtertype)
         if (!type) return -1;
 
         for(i=0;i<sizeof(ftmap)/sizeof(ftmap[0]);++i)
-                if(!strcmp(ftmap[i].type, type))
+                if(!strcasecmp(ftmap[i].type, type))
                         conf->filter_opts |= ftmap[i].flag;
 
         safefree (type);
@@ -1114,10 +1124,13 @@ static HANDLE_FUNC (handle_upstream)
                 pass = get_string_arg (line, &match[mi]);
         mi++;
 
-        ip = get_string_arg (line, &match[mi]);
+        if (match[mi+4].rm_so != -1) /* IPv6 address in square brackets */
+                ip = get_string_arg (line, &match[mi+4]);
+        else
+                ip = get_string_arg (line, &match[mi]);
         if (!ip)
                 return -1;
-        mi += 5;
+        mi += 16;
 
         port = (int) get_long_arg (line, &match[mi]);
         mi += 3;

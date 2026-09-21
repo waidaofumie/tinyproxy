@@ -34,6 +34,7 @@
 #include "sblist.h"
 #include "loop.h"
 #include "conns.h"
+#include "stats.h"
 #include "mypoll.h"
 #include <pthread.h>
 
@@ -81,7 +82,7 @@ void child_main_loop (void)
         int connfd;
         union sockaddr_union cliaddr_storage;
         struct sockaddr *cliaddr = (void*) &cliaddr_storage;
-        socklen_t clilen = sizeof(cliaddr_storage);
+        socklen_t clilen;
         int nfds = sblist_getsize(listen_fds);
         pollfd_struct *fds = safecalloc(nfds, sizeof *fds);
         ssize_t i;
@@ -106,10 +107,12 @@ void child_main_loop (void)
                 collect_threads();
 
                 if (sblist_getsize(childs) >= config->maxclients) {
-                        if (!was_full)
+                        if (!was_full){
+                                update_stats (STAT_REFUSE);
                                 log_message (LOG_WARNING,
                                              "Maximum number of connections reached. "
                                              "Refusing new connections.");
+                        }
                         was_full = 1;
                         usleep(16);
                         continue;
@@ -167,6 +170,7 @@ void child_main_loop (void)
                  * Continue handling this connection.
                  */
 
+                clilen = sizeof(cliaddr_storage);
                 connfd = accept (listenfd, cliaddr, &clilen);
 
 

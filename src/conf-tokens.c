@@ -18,7 +18,7 @@ config_directive_find (register const char *str, register size_t len)
   size_t i;
   static const struct config_directive_entry wordlist[] =
     {
-      {"",CD_NIL}, {"",CD_NIL},
+      {"",CD_NIL},
       {"allow", CD_allow},
       {"stathost", CD_stathost},
       {"listen", CD_listen},
@@ -57,6 +57,7 @@ config_directive_find (register const char *str, register size_t len)
       {"connectport", CD_connectport},
       {"logfile", CD_logfile},
       {"basicauth", CD_basicauth},
+      {"basicauthrealm", CD_basicauthrealm},
       {"addheader", CD_addheader},
       {"maxrequestsperchild", CD_maxrequestsperchild}
     };

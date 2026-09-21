@@ -22,8 +22,8 @@ configuration file.
 The Tinyproxy configuration file contains key-value pairs, one per
 line. Lines starting with `#` and empty lines are comments and are
 ignored. Keywords are case-insensitive, whereas values are
-case-sensitive. Values may be enclosed in double-quotes (") if they
-contain spaces.
+case-sensitive. Some string values must be enclosed in double
+quotes (") as noted below.
 
 The possible keywords and their descriptions are as follows:
 
@@ -57,7 +57,7 @@ only on one specific address.
 =item B<Bind>
 
 This allows you to specify which address Tinyproxy will bind
-to for outgoing connections to web servers or upstream proxies.
+to for outgoing connections.
 This parameter may be specified multiple times, then Tinyproxy
 will try all the specified addresses in order.
 
@@ -76,29 +76,29 @@ allowed to have before it is closed by Tinyproxy.
 
 This parameter controls which HTML file Tinyproxy returns when a
 given HTTP error occurs. It takes two arguments, the error number
-and the location of the HTML error file.
+and the location of the HTML error file. Enclose the file location
+in double quotes.
 
 =item B<DefaultErrorFile>
 
-This parameter controls the HTML template file returned when an
-error occurs for which no specific error file has been set.
+The HTML template file returned when an error occurs for which no
+specific error file has been set. Enclose in double quotes.
 
 =item B<StatHost>
 
-This configures the host name or IP address that is treated
-as the `stat host`: Whenever a request for this host is received,
-Tinyproxy will return an internal statistics page instead of
-forwarding the request to that host. The template for this
-page can be configured with the `StatFile` configuration option.
-The default value of `StatHost` is `@TINYPROXY_STATHOST@`.
+The host name or IP address that is treated as the `stat host`.
+Enclose in double quotes. Whenever Tinyproxy receives a request for
+the `stat host` it returns an internal statistics page instead of
+forwarding the request to that host. The template for this page can be
+configured with the `StatFile` configuration option. The default value
+of `StatHost` is `@TINYPROXY_STATHOST@`.
 
 =item B<StatFile>
 
-This configures the HTML file that Tinyproxy sends when
-a request for the stathost is received. If this parameter is
-not set, Tinyproxy returns a hard-coded basic statistics page.
-See the STATHOST section in the L<tinyproxy(8)> manual page
-for details.
+The HTML file that Tinyproxy sends in response to a request for the
+`stat host`. Enclose in double quotes. If this parameter is not set,
+Tinyproxy returns a hard-coded basic statistics page. See the STATHOST
+section in the L<tinyproxy(8)> manual page for details.
 
 Note that the StatFile and the error files configured with ErrorFile
 and DefaultErrorFile are template files that can contain a few
@@ -109,9 +109,9 @@ manual page contains a description of all template variables.
 
 =item B<LogFile>
 
-This controls the location of the file to which Tinyproxy
-writes its debug output. Alternatively, Tinyproxy can log
-to syslog -- see the Syslog option.
+The location of the file to which Tinyproxy writes its debug output.
+Enclose in double quotes. Alternatively, Tinyproxy can log to syslog
+-- see the Syslog option.
 
 =item B<Syslog>
 
@@ -144,8 +144,8 @@ and below would be suppressed. Allowed values are:
 
 =item B<PidFile>
 
-This option controls the location of the file where the main
-Tinyproxy process stores its process ID for signaling purposes.
+The location of the file where the main Tinyproxy process stores its
+process ID for signaling purposes. Enclose in double quotes.
 
 =item B<XTinyproxy>
 
@@ -173,26 +173,38 @@ turns on the upstream proxy for the sites matching `site_spec`.
 
 `type` can be one of `http`, `socks4`, `socks5`, `none`.
 
+see below for what constitues a `site_spec`.
+
 =item * I<upstream none "site_spec">
 turns off upstream support for sites matching `site_spec`, that means the
 connection is done directly.
 
 =back
 
-The site can be specified in various forms as a hostname, domain
-name or as an IP range:
+It's recommended to use raw IP addresses to specify the upstream host, so
+no costly DNS lookup has to be done everytime it is used.
+IPv6 addresses need to be enclosed in square brackets.
 
 =over 4
 
-=item * I<name>     matches host exactly
+=item B<site_spec>
 
-=item * I<.name>    matches any host in domain "name"
+A `site_spec` matches sites by name, domain or IP range. The site
+can be specified in various forms as follows:
 
-=item * I<.>        matches any host with no domain (in 'empty' domain)
+=over 4
 
-=item * I<IP/bits>  matches network/mask
+=item * I<name>        matches host exactly
 
-=item * I<IP/mask>  matches network/mask
+=item * I<.name>       matches any host in domain "name"
+
+=item * I<.>           matches any host with no domain (in 'empty' domain)
+
+=item * I<IP/bits>     matches network/mask
+
+=item * I<IP/mask>     matches network/mask
+
+=back
 
 =back
 
@@ -218,11 +230,11 @@ list for Tinyproxy. The order in the config file is important.
 If there are no `Allow` or `Deny` lines, then all clients are
 allowed. Otherwise, the default action is to deny access.
 The argument to `Allow` or `Deny` can be a single IP address
-of a client host, like `127.0.0.1`, an IP address range, like
-`192.168.0.1/24` or a string that will be matched against the
-end of the client host name, i.e, this can be a full host name
-like `host.example.com` or a domain name like `.example.com` or
-even a top level domain name like `.com`.
+of a client host, like `127.0.0.1` or `::1`, an IP address range, like
+`192.168.0.1/24` or a hostname (`site_spec`). A site_spec is matched
+against the client host name at label boundaries,
+see the B<site_spec> above.
+
 Note that by adding a rule using a host or domain name, a costly name
 lookup has to be done for every new connection, which could slow down
 the service considerably.
@@ -234,6 +246,14 @@ for accessing the proxy.  If there are any entries specified,
 access is only granted for authenticated users.
 
     BasicAuth user password
+
+=item B<BasicAuthRealm>
+
+In case "BasicAuth" is configured, the "realm" information.
+"Proxy Authentication Required" status http 407 "error-response" can be
+customized.
+
+- defaults in code to "Tinyproxy" (PACKAGE_NAME), if not configured.
 
 =item B<AddHeader>
 
@@ -250,7 +270,8 @@ RFC 2616 requires proxies to add a `Via` header to the HTTP
 requests, but using the real host name can be a security
 concern. If the `ViaProxyname` option is present, then its
 string value will be used as the host name in the Via header.
-Otherwise, the server's host name will be used.
+Otherwise, the server's host name will be used. Enclose in double
+quotes.
 
 =item B<DisableViaHeader>
 
@@ -276,7 +297,7 @@ Example filter file contents:
  ^cnn\.com$
  
  # filter all subdomains of cnn.com, but not cnn.com itself
- .*\.cnn.com$
+ .*\.cnn\.com$
  
  # filter any domain that has cnn.com in it, like xcnn.comfy.org
  cnn\.com
@@ -344,7 +365,7 @@ If an `Anonymous` keyword is present, then anonymous proxying
 is enabled.  The headers listed with `Anonymous` are allowed
 through, while all others are denied. If no Anonymous keyword
 is present, then all headers are allowed through.  You must
-include quotes around the headers.
+include double quotes around the headers.
 
 Most sites require cookies to be enabled for them to work correctly, so
 you will need to allow cookies through if you access those sites.
@@ -415,7 +436,7 @@ This manpage was written by the Tinyproxy project team.
 
 =head1 COPYRIGHT
 
-Copyright (c) 1998-2020 the Tinyproxy authors.
+Copyright (c) 1998-2024 the Tinyproxy authors.
 
 This program is distributed under the terms of the GNU General Public
 License version 2 or above. See the COPYING file for additional

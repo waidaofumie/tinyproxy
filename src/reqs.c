@@ -33,7 +33,7 @@
 #include "conns.h"
 #include "filter.h"
 #include "hsearch.h"
-#include "orderedmap.h"
+#include "pseudomap.h"
 #include "heap.h"
 #include "html-error.h"
 #include "log.h"
@@ -174,7 +174,7 @@ static int strip_return_port (char *host)
 {
         char *ptr1;
         char *ptr2;
-        int port;
+        unsigned port;
 
         ptr1 = strrchr (host, ':');
         if (ptr1 == NULL)
@@ -186,8 +186,11 @@ static int strip_return_port (char *host)
                 return 0;
 
         *ptr1++ = '\0';
-        if (sscanf (ptr1, "%d", &port) != 1)    /* one conversion required */
-                return 0;
+
+        port = atoi(ptr1);
+        /* check that port string is in the valid range 1-0xffff) */
+        if(strlen(ptr1) > 5 || (port & 0xffff0000)) return 0;
+
         return port;
 }
 
@@ -221,6 +224,10 @@ static int extract_url (const char *url, int default_port,
         if (!request->host || !request->path)
                 goto ERROR_EXIT;
 
+        /* e.g. "http:///" or "CONNECT /foo" */
+        if (!*request->host)
+                goto ERROR_EXIT;
+
         /* Remove the username/password if they're present */
         strip_username_password (request->host);
 
@@ -237,6 +244,10 @@ static int extract_url (const char *url, int default_port,
                 p--;
                 *p = '\0';
         }
+
+        /* e.g. "http://user@/", "http://:8080/" or "http://[]/" */
+        if (!*request->host)
+                goto ERROR_EXIT;
 
         return 0;
 
@@ -301,21 +312,27 @@ establish_http_connection (struct conn_s *connptr, struct request_s *request)
 }
 
 /*
- * These two defines are for the SSL tunnelling.
+ * Send the appropriate response to the client to establish a
+ * connection via CONNECT method.
  */
-#define SSL_CONNECTION_RESPONSE "HTTP/1.0 200 Connection established"
-#define PROXY_AGENT "Proxy-agent: " PACKAGE "/" VERSION
-
-/*
- * Send the appropriate response to the client to establish a SSL
- * connection.
- */
-static int send_ssl_response (struct conn_s *connptr)
+static int send_connect_method_response (struct conn_s *connptr)
 {
         return write_message (connptr->client_fd,
-                              "%s\r\n"
-                              "%s\r\n"
-                              "\r\n", SSL_CONNECTION_RESPONSE, PROXY_AGENT);
+                              "HTTP/1.%u 200 Connection established\r\n"
+                              "Proxy-agent: " PACKAGE "\r\n"
+                              "\r\n", connptr->protocol.major != 1 ? 0 :
+                                      connptr->protocol.minor);
+}
+
+/* determine whether a hostname with optional trailing colon/port is the
+   stathost */
+static int is_stathost (const char* host)
+{
+        const char *p = config->stathost;
+        const char *q = host;
+        if (!p || !q) return 0;
+        while (*p && *(p++) == *(q++));
+        return *p == 0 && (*q == 0 || *q == ':');
 }
 
 /*
@@ -323,12 +340,14 @@ static int send_ssl_response (struct conn_s *connptr)
  * build a new request line. Finally connect to the remote server.
  */
 static struct request_s *process_request (struct conn_s *connptr,
-                                          orderedmap hashofheaders)
+                                          pseudomap *hashofheaders)
 {
         char *url;
         struct request_s *request;
-        int ret;
+        int ret, skip_trans;
         size_t request_len;
+
+        skip_trans = 0;
 
         /* NULL out all the fields so frees don't cause segfaults. */
         request =
@@ -346,8 +365,12 @@ static struct request_s *process_request (struct conn_s *connptr,
                 goto fail;
         }
 
+        /* zero-terminate the strings so they don't contain junk in error page */
+        request->method[0] = url[0] = request->protocol[0] = 0;
+
         ret = sscanf (connptr->request_line, "%[^ ] %[^ ] %[^ ]",
                       request->method, url, request->protocol);
+
         if (ret == 2 && !strcasecmp (request->method, "GET")) {
                 request->protocol[0] = 0;
 
@@ -380,6 +403,16 @@ BAD_REQUEST_ERROR:
                 goto fail;
         }
 
+        /*
+         * Check to see if they're requesting the stat host
+         */
+        if (is_stathost (pseudomap_find (hashofheaders, "host"))) {
+got_stathost:
+                log_message (LOG_NOTICE, "Request for the stathost.");
+                connptr->show_stats = TRUE;
+                goto fail;
+        }
+
 #ifdef REVERSE_SUPPORT
         if (config->reversepath_list != NULL) {
                 /*
@@ -398,10 +431,12 @@ BAD_REQUEST_ERROR:
                                 char buf[PATH_MAX];
                                 snprintf (buf, sizeof buf, "Location: %s\r\n", reverse_url);
                                 send_http_headers (connptr, 301, "Moved Permanently", buf);
+                                safefree (reverse_url);
                                 goto fail;
                         }
                         safefree (url);
                         url = reverse_url;
+                        skip_trans = 1;
                 } else if (config->reverseonly) {
                         log_message (LOG_ERR,
                                      "Bad request, no mapping for '%s' found",
@@ -451,11 +486,13 @@ BAD_REQUEST_ERROR:
                 connptr->connect_method = TRUE;
         } else {
 #ifdef TRANSPARENT_PROXY
-                if (!do_transparent_proxy
-                    (connptr, hashofheaders, request, config, &url)) {
-                        goto fail;
-                }
-#else
+                if (!skip_trans) {
+                        if (!do_transparent_proxy
+                            (connptr, hashofheaders, request, config, &url))
+                                goto fail;
+                } else
+#endif
+                {
                 indicate_http_error (connptr, 501, "Not Implemented",
                                      "detail",
                                      "Unknown method or unsupported protocol.",
@@ -463,7 +500,7 @@ BAD_REQUEST_ERROR:
                 log_message (LOG_INFO, "Unknown method (%s) or protocol (%s)",
                              request->method, url);
                 goto fail;
-#endif
+                }
         }
 
 #ifdef FILTER_ENABLE
@@ -490,19 +527,11 @@ BAD_REQUEST_ERROR:
                 }
         }
 #endif
-
-
-        /*
-         * Check to see if they're requesting the stat host
-         */
-        if (config->stathost && strcmp (config->stathost, request->host) == 0) {
-                log_message (LOG_NOTICE, "Request for the stathost.");
-                connptr->show_stats = TRUE;
-                goto fail;
-        }
+        /* check whether hostname from url is the stathost */
+        if (is_stathost (request->host))
+                goto got_stathost;
 
         safefree (url);
-
         return request;
 
 fail:
@@ -517,11 +546,10 @@ fail:
  * server headers can be processed.
  *	- rjkaes
  */
-static int pull_client_data (struct conn_s *connptr, long int length, int iehack)
+static int pull_client_data (struct conn_s *connptr, long int length)
 {
         char *buffer;
         ssize_t len;
-        int ret;
 
         buffer =
             (char *) safemalloc (min (MAXBUFFSIZE, (unsigned long int) length));
@@ -541,43 +569,6 @@ static int pull_client_data (struct conn_s *connptr, long int length, int iehack
 
                 length -= len;
         } while (length > 0);
-
-        if (iehack) {
-                /*
-                 * BUG FIX: Internet Explorer will leave two bytes (carriage
-                 * return and line feed) at the end of a POST message.  These
-                 * need to be eaten for tinyproxy to work correctly.
-                 */
-                ret = socket_nonblocking (connptr->client_fd);
-                if (ret != 0) {
-                        log_message(LOG_ERR, "Failed to set the client socket "
-                                    "to non-blocking: %s", strerror(errno));
-                        goto ERROR_EXIT;
-                }
-        
-                len = recv (connptr->client_fd, buffer, 2, MSG_PEEK);
-        
-                ret = socket_blocking (connptr->client_fd);
-                if (ret != 0) {
-                        log_message(LOG_ERR, "Failed to set the client socket "
-                                    "to blocking: %s", strerror(errno));
-                        goto ERROR_EXIT;
-                }
-        
-                if (len < 0 && errno != EAGAIN)
-                        goto ERROR_EXIT;
-        
-                if ((len == 2) && CHECK_CRLF (buffer, len)) {
-                        ssize_t bytes_read;
-        
-                        bytes_read = read (connptr->client_fd, buffer, 2);
-                        if (bytes_read == -1) {
-                                log_message
-                                        (LOG_WARNING,
-                                         "Could not read two bytes from POST message");
-                        }
-                }
-        }
 
         safefree (buffer);
         return 0;
@@ -606,8 +597,10 @@ static int pull_client_data_chunked (struct conn_s *connptr) {
                 }
 
                 chunklen = strtol (buffer, (char**)0, 16);
+                /* prevent negative or huge values causing overflow */
+                if (chunklen < 0 || chunklen > 0x0fffffff) goto ERROR_EXIT;
 
-                if (pull_client_data (connptr, chunklen+2, 0) < 0)
+                if (pull_client_data (connptr, chunklen+2) < 0)
                         goto ERROR_EXIT;
 
                 if(!chunklen) break;
@@ -635,31 +628,50 @@ static int add_xtinyproxy_header (struct conn_s *connptr)
 }
 #endif /* XTINYPROXY */
 
+static int
+check_duplicate_header (pseudomap *hashofheaders, char *header, const char* kw)
+{
+        return (!strcasecmp(header, kw) &&
+            pseudomap_find (hashofheaders, kw));
+}
+
+
 /*
  * Take a complete header line and break it apart (into a key and the data.)
  * Now insert this information into the hashmap for the connection so it
  * can be retrieved and manipulated later.
  */
 static int
-add_header_to_connection (orderedmap hashofheaders, char *header, size_t len)
+add_header_to_connection (pseudomap *hashofheaders, char *header, size_t len)
 {
-        char *sep;
+        char *sep, *p;
 
         /* Get rid of the new line and return at the end */
-        len -= chomp (header, len);
+        (void) chomp (header, len);
 
         sep = strchr (header, ':');
         if (!sep)
                 return 0; /* just skip invalid header, do not give error */
 
+        /* Remove any trailing whitespace before colon */
+        if (sep == header)
+                return 0;
+        p = sep;
+        while (p > header && (p[-1] == ' ' || p[-1] == '\t'))
+                *--p = '\0';
+        if (*header == '\0')
+                return 0;
+
         /* Blank out colons, spaces, and tabs. */
         while (*sep == ':' || *sep == ' ' || *sep == '\t')
                 *sep++ = '\0';
 
-        /* Calculate the new length of just the data */
-        len -= sep - header - 1;
+        /* prevent multiple CL/TE headers from being inserted */
+        if (check_duplicate_header(hashofheaders, header, "content-length") ||
+            check_duplicate_header(hashofheaders, header, "transfer-encoding"))
+                return 0;
 
-        return orderedmap_append (hashofheaders, header, sep);
+        return pseudomap_append (hashofheaders, header, sep);
 }
 
 /*
@@ -672,7 +684,7 @@ add_header_to_connection (orderedmap hashofheaders, char *header, size_t len)
 /*
  * Read all the headers from the stream
  */
-static int get_all_headers (int fd, orderedmap hashofheaders)
+static int get_all_headers (int fd, pseudomap *hashofheaders)
 {
         char *line = NULL;
         char *header = NULL;
@@ -765,24 +777,33 @@ static int get_all_headers (int fd, orderedmap hashofheaders)
  * Extract the headers to remove.  These headers were listed in the Connection
  * and Proxy-Connection headers.
  */
-static int remove_connection_headers (orderedmap hashofheaders)
+static int remove_connection_headers (pseudomap *hashofheaders)
 {
         static const char *headers[] = {
                 "connection",
                 "proxy-connection"
         };
+        /* message framing headers which must never be removed by a
+           Connection option, otherwise the body we forward according
+           to the precomputed length is no longer delimited for the
+           receiver (request/response smuggling). */
+        static const char *protected_headers[] = {
+                "content-length",
+                "transfer-encoding"
+        };
 
         char *data;
         char *ptr;
         ssize_t len;
-        int i;
+        int i,j,df;
 
         for (i = 0; i != (sizeof (headers) / sizeof (char *)); ++i) {
-                /* Look for the connection header.  If it's not found, return. */
-                data = orderedmap_find(hashofheaders, headers[i]);
+                /* Look for the connection header.  If it's not found,
+                   check the next one. */
+                data = pseudomap_find(hashofheaders, headers[i]);
 
                 if (!data)
-                        return 0;
+                        continue;
 
                 len = strlen(data);
 
@@ -800,7 +821,14 @@ static int remove_connection_headers (orderedmap hashofheaders)
                  */
                 ptr = data;
                 while (ptr < data + len) {
-                        orderedmap_remove (hashofheaders, ptr);
+                        df = 0;
+                        /* check that ptr isn't one of headers to prevent
+                           double-free (CVE-2023-49606) */
+                        for (j = 0; j != (sizeof (headers) / sizeof (char *)); ++j)
+                                if(!strcasecmp(ptr, headers[j])) df = 1;
+                        for (j = 0; j != (sizeof (protected_headers) / sizeof (char *)); ++j)
+                                if(!strcasecmp(ptr, protected_headers[j])) df = 1;
+                        if (!df) pseudomap_remove (hashofheaders, ptr);
 
                         /* Advance ptr to the next token */
                         ptr += strlen (ptr) + 1;
@@ -809,7 +837,7 @@ static int remove_connection_headers (orderedmap hashofheaders)
                 }
 
                 /* Now remove the connection header it self. */
-                orderedmap_remove (hashofheaders, headers[i]);
+                pseudomap_remove (hashofheaders, headers[i]);
         }
 
         return 0;
@@ -819,12 +847,12 @@ static int remove_connection_headers (orderedmap hashofheaders)
  * If there is a Content-Length header, then return the value; otherwise, return
  * -1.
  */
-static long get_content_length (orderedmap hashofheaders)
+static long get_content_length (pseudomap *hashofheaders)
 {
         char *data;
         long content_length = -1;
 
-        data = orderedmap_find (hashofheaders, "content-length");
+        data = pseudomap_find (hashofheaders, "content-length");
 
         if (data)
                 content_length = atol (data);
@@ -832,11 +860,49 @@ static long get_content_length (orderedmap hashofheaders)
         return content_length;
 }
 
-static int is_chunked_transfer (orderedmap hashofheaders)
-{
+/* In-place sanitize the Transfer-Encoding value by removing superfluous
+   whitespace.
+   Returns 1 if a valid trailing "chunked" transfer-coding is present.
+   Returns -1 if "chunked" is present but malformed / not final; otherwise 0. */
+static int
+check_chunked_and_sanitize_transfer_encoding(pseudomap *hashofheaders) {
         char *data;
-        data = orderedmap_find (hashofheaders, "transfer-encoding");
-        return data ? !strcmp (data, "chunked") : 0;
+        int was_comma = 0, ret = 0, c;
+        char *ins, *p, *chunked = 0;
+        data = pseudomap_find (hashofheaders, "transfer-encoding");
+        if (!data) return 0;
+        ins = p = data;
+        while (*p) {
+                c = *(p++);
+                switch (c) {
+                case ',':
+                        if (was_comma || chunked || ins == data) ret = -1;
+                        if (!was_comma) *(ins++) = c;
+                        was_comma = 1;
+                        break;
+                case '\t': case ' ':
+                        if (was_comma) {
+                                if (was_comma == 1) *(ins++) = ' ';
+                                ++was_comma;
+                        } else was_comma = 0;
+                        break;
+                case 'C': case 'c':
+                        if (!strncasecmp(p, "hunked", 6)) {
+                                if (chunked || !(was_comma || ins == data))
+                                        ret = -1;
+                                chunked = ins;
+                        }
+                        /* fall-through */
+                default:
+                        was_comma = 0;
+                        *(ins++) = c;
+                }
+        }
+        *ins = 0;
+        if (ret == -1) return ret;
+        /* after sanitization, if chunked was found, it needs to be the final coding */
+        if (chunked && (chunked[7] == 0 || chunked[7] == ';')) return 1;
+        return 0;
 }
 
 /*
@@ -847,7 +913,7 @@ static int is_chunked_transfer (orderedmap hashofheaders)
  * purposes.
  */
 static int
-write_via_header (int fd, orderedmap hashofheaders,
+write_via_header (int fd, pseudomap *hashofheaders,
                   unsigned int major, unsigned int minor)
 {
         char hostname[512];
@@ -869,28 +935,22 @@ write_via_header (int fd, orderedmap hashofheaders,
          * See if there is a "Via" header.  If so, again we need to do a bit
          * of processing.
          */
-        data = orderedmap_find (hashofheaders, "via");
+        data = pseudomap_find (hashofheaders, "via");
         if (data) {
                 ret = write_message (fd,
-                                     "Via: %s, %hu.%hu %s (%s/%s)\r\n",
-                                     data, major, minor, hostname, PACKAGE,
-                                     VERSION);
+                                     "Via: %s, %hu.%hu %s (%s)\r\n",
+                                     data, major, minor, hostname, PACKAGE);
 
-                orderedmap_remove (hashofheaders, "via");
+                pseudomap_remove (hashofheaders, "via");
         } else {
                 ret = write_message (fd,
-                                     "Via: %hu.%hu %s (%s/%s)\r\n",
-                                     major, minor, hostname, PACKAGE, VERSION);
+                                     "Via: %hu.%hu %s (%s)\r\n",
+                                     major, minor, hostname, PACKAGE);
         }
 
 done:
         return ret;
 }
-
-/*
- * Number of buckets to use internally in the hashmap.
- */
-#define HEADER_BUCKETS 32
 
 /*
  * Here we loop through all the headers the client is sending. If we
@@ -899,7 +959,7 @@ done:
  *	- rjkaes
  */
 static int
-process_client_headers (struct conn_s *connptr, orderedmap hashofheaders)
+process_client_headers (struct conn_s *connptr, pseudomap *hashofheaders)
 {
         static const char *skipheaders[] = {
                 "host",
@@ -933,9 +993,21 @@ process_client_headers (struct conn_s *connptr, orderedmap hashofheaders)
          */
         connptr->content_length.client = get_content_length (hashofheaders);
 
-        /* Check whether client sends chunked data. */
-        if (connptr->content_length.client == -1 && is_chunked_transfer (hashofheaders))
+        ret = check_chunked_and_sanitize_transfer_encoding(hashofheaders);
+        if (ret == -1) {
+                /* bad transfer-encoding: RFC 9112 6.1 */
+                indicate_http_error (connptr, 400,
+                                     "Bad Request",
+                                     NULL);
+                goto PULL_CLIENT_DATA;
+        } else if (ret == 1) {
+                /* well-formatted "chunked" transfer-encoding */
+                if (connptr->content_length.client != -1)
+                        /* request smuggling, see GH issue #609 */
+                        pseudomap_remove (hashofheaders, "content-length");
+
                 connptr->content_length.client = -2;
+        }
 
         /*
          * See if there is a "Connection" header.  If so, we need to do a bit
@@ -947,7 +1019,7 @@ process_client_headers (struct conn_s *connptr, orderedmap hashofheaders)
          * Delete the headers listed in the skipheaders list
          */
         for (i = 0; i != (sizeof (skipheaders) / sizeof (char *)); i++) {
-                orderedmap_remove (hashofheaders, skipheaders[i]);
+                pseudomap_remove (hashofheaders, skipheaders[i]);
         }
 
         /* Send, or add the Via header */
@@ -968,7 +1040,7 @@ process_client_headers (struct conn_s *connptr, orderedmap hashofheaders)
          * Output all the remaining headers to the remote machine.
          */
         iter = 0;
-        while((iter = orderedmap_next(hashofheaders, iter, &data, &header))) {
+        while((iter = pseudomap_next(hashofheaders, iter, &data, &header))) {
                 if (!is_anonymous_enabled (config)
                     || anonymous_search (config, data) > 0) {
                         ret =
@@ -1001,7 +1073,7 @@ process_client_headers (struct conn_s *connptr, orderedmap hashofheaders)
 PULL_CLIENT_DATA:
         if (connptr->content_length.client > 0) {
                 ret = pull_client_data (connptr,
-                                        connptr->content_length.client, 1);
+                                        connptr->content_length.client);
         } else if (connptr->content_length.client == -2)
                 ret = pull_client_data_chunked (connptr);
 
@@ -1023,7 +1095,7 @@ static int process_server_headers (struct conn_s *connptr)
 
         char *response_line;
 
-        orderedmap hashofheaders;
+        pseudomap *hashofheaders;
         size_t iter;
         char *data, *header;
         ssize_t len;
@@ -1053,7 +1125,7 @@ retry:
                 goto retry;
         }
 
-        hashofheaders = orderedmap_create (HEADER_BUCKETS);
+        hashofheaders = pseudomap_create ();
         if (!hashofheaders) {
                 safefree (response_line);
                 return -1;
@@ -1065,7 +1137,7 @@ retry:
         if (get_all_headers (connptr->server_fd, hashofheaders) < 0) {
                 log_message (LOG_WARNING,
                              "Could not retrieve all the headers from the remote server.");
-                orderedmap_destroy (hashofheaders);
+                pseudomap_destroy (hashofheaders);
                 safefree (response_line);
 
                 indicate_http_error (connptr, 503,
@@ -1084,7 +1156,7 @@ retry:
          * Instead we'll free all the memory and return.
          */
         if (connptr->protocol.major < 1) {
-                orderedmap_destroy (hashofheaders);
+                pseudomap_destroy (hashofheaders);
                 safefree (response_line);
                 return 0;
         }
@@ -1111,7 +1183,7 @@ retry:
          * Delete the headers listed in the skipheaders list
          */
         for (i = 0; i != (sizeof (skipheaders) / sizeof (char *)); i++) {
-                orderedmap_remove (hashofheaders, skipheaders[i]);
+                pseudomap_remove (hashofheaders, skipheaders[i]);
         }
 
         /* Send, or add the Via header */
@@ -1133,7 +1205,7 @@ retry:
 
         /* Rewrite the HTTP redirect if needed */
         if (config->reversebaseurl &&
-            (header = orderedmap_find (hashofheaders, "location"))) {
+            (header = pseudomap_find (hashofheaders, "location"))) {
 
                 /* Look for a matching entry in the reversepath list */
                 while (reverse) {
@@ -1158,7 +1230,7 @@ retry:
                                      "Rewriting HTTP redirect: %s -> %s%s%s",
                                      header, config->reversebaseurl,
                                      (reverse->path + 1), (header + len));
-                        orderedmap_remove (hashofheaders, "location");
+                        pseudomap_remove (hashofheaders, "location");
                 }
         }
 #endif
@@ -1167,14 +1239,14 @@ retry:
          * All right, output all the remaining headers to the client.
          */
         iter = 0;
-        while ((iter = orderedmap_next(hashofheaders, iter, &data, &header))) {
+        while ((iter = pseudomap_next(hashofheaders, iter, &data, &header))) {
 
                 ret = write_message (connptr->client_fd,
                                      "%s: %s\r\n", data, header);
                 if (ret < 0)
                         goto ERROR_EXIT;
         }
-        orderedmap_destroy (hashofheaders);
+        pseudomap_destroy (hashofheaders);
 
         /* Write the final blank line to signify the end of the headers */
         if (safe_write (connptr->client_fd, "\r\n", 2) < 0)
@@ -1183,13 +1255,13 @@ retry:
         return 0;
 
 ERROR_EXIT:
-        orderedmap_destroy (hashofheaders);
+        pseudomap_destroy (hashofheaders);
         return -1;
 }
 
 /*
- * Switch the sockets into nonblocking mode and begin relaying the bytes
- * between the two connections. We continue to use the buffering code
+ * Begin relaying the bytes between the two connections.
+ * We continue to use the buffering code
  * since we want to be able to buffer a certain amount for slower
  * connections (as this was the reason why I originally modified
  * tinyproxy oh so long ago...)
@@ -1262,14 +1334,6 @@ static void relay_connection (struct conn_s *connptr)
         /*
          * Try to send any remaining data to the server if we can.
          */
-        ret = socket_blocking (connptr->server_fd);
-        if (ret != 0) {
-                log_message(LOG_ERR,
-                            "Failed to set server socket to blocking: %s",
-                            strerror(errno));
-                return;
-        }
-
         while (buffer_size (connptr->cbuffer) > 0) {
                 if (write_buffer (connptr->server_fd, connptr->cbuffer) < 0)
                         break;
@@ -1278,6 +1342,7 @@ static void relay_connection (struct conn_s *connptr)
         return;
 }
 
+#ifdef UPSTREAM_SUPPORT
 static int
 connect_to_upstream_proxy(struct conn_s *connptr, struct request_s *request)
 {
@@ -1394,7 +1459,7 @@ connect_to_upstream_proxy(struct conn_s *connptr, struct request_s *request)
 
 	return establish_http_connection(connptr, request);
 }
-
+#endif
 
 /*
  * Establish a connection to the upstream proxy server.
@@ -1550,18 +1615,24 @@ static void handle_connection_failure(struct conn_s *connptr, int got_headers)
         }
 }
 
+static void auth_error(struct conn_s *connptr, int code) {
+        const char *tit = code == 401 ? "Unauthorized" : "Proxy Authentication Required";
+        const char *msg = code == 401 ?
+        "The administrator of this proxy has not configured it to service requests from you." :
+        "This proxy requires authentication.";
+
+        update_stats (STAT_DENIED);
+        log_message (LOG_INFO,
+                     "Failed auth attempt (file descriptor: %d), ip %s",
+                     connptr->client_fd,
+                     connptr->client_ip_addr);
+        indicate_http_error (connptr, code, tit, "detail", msg, NULL);
+}
 
 /*
- * This is the main drive for each connection. As you can tell, for the
- * first few steps we are using a blocking socket. If you remember the
- * older tinyproxy code, this use to be a very confusing state machine.
- * Well, no more! :) The sockets are only switched into nonblocking mode
- * when we start the relay portion. This makes most of the original
- * tinyproxy code, which was confusing, redundant. Hail progress.
- * 	- rjkaes
-
+ * This is the main drive for each connection.
  * this function is called directly from child_thread() with the newly
- * received fd from accept(). 
+ * received fd from accept().
  */
 void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
 {
@@ -1573,7 +1644,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
         int got_headers = 0, fd = connptr->client_fd;
         size_t i;
         struct request_s *request = NULL;
-        orderedmap hashofheaders = NULL;
+        pseudomap *hashofheaders = NULL;
 
         char sock_ipaddr[IP_LENGTH];
         char peer_ipaddr[IP_LENGTH];
@@ -1628,7 +1699,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
         /*
          * The "hashofheaders" store the client's headers.
          */
-        hashofheaders = orderedmap_create (HEADER_BUCKETS);
+        hashofheaders = pseudomap_create ();
         if (hashofheaders == NULL) {
                 update_stats (STAT_BADCONN);
                 indicate_http_error (connptr, 503, "Internal error",
@@ -1657,41 +1728,30 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
         if (config->basicauth_list != NULL) {
                 char *authstring;
                 int failure = 1, stathost_connect = 0;
-                authstring = orderedmap_find (hashofheaders, "proxy-authorization");
+                authstring = pseudomap_find (hashofheaders, "proxy-authorization");
 
                 if (!authstring && config->stathost) {
-                        authstring = orderedmap_find (hashofheaders, "host");
-                        if (authstring && !strncmp(authstring, config->stathost, strlen(config->stathost))) {
-                                authstring = orderedmap_find (hashofheaders, "authorization");
+                        authstring = pseudomap_find (hashofheaders, "host");
+                        if (authstring && is_stathost(authstring)) {
+                                authstring = pseudomap_find (hashofheaders, "authorization");
                                 stathost_connect = 1;
                         } else authstring = 0;
                 }
 
                 if (!authstring) {
-                        if (stathost_connect) goto e401;
-                        update_stats (STAT_DENIED);
-                        indicate_http_error (connptr, 407, "Proxy Authentication Required",
-                                             "detail",
-                                             "This proxy requires authentication.",
-                                             NULL);
+                        auth_error(connptr, stathost_connect ? 401 : 407);
                         HC_FAIL();
                 }
-                if ( /* currently only "basic" auth supported */
-                        (strncmp(authstring, "Basic ", 6) == 0 ||
-                         strncmp(authstring, "basic ", 6) == 0) &&
+                if ( /* currently only "basic" auth supported,
+                        scheme is case-insensitive (RFC 7235 2.1) */
+                        strncasecmp(authstring, "Basic ", 6) == 0 &&
                         basicauth_check (config->basicauth_list, authstring + 6) == 1)
                                 failure = 0;
                 if(failure) {
-e401:
-                        update_stats (STAT_DENIED);
-                        indicate_http_error (connptr, 401, "Unauthorized",
-                                             "detail",
-                                             "The administrator of this proxy has not configured "
-                                             "it to service requests from you.",
-                                             NULL);
+                        auth_error(connptr, stathost_connect ? 401 : 407);
                         HC_FAIL();
                 }
-                orderedmap_remove (hashofheaders, "proxy-authorization");
+                pseudomap_remove (hashofheaders, "proxy-authorization");
         }
 
         /*
@@ -1702,7 +1762,7 @@ e401:
         for (i = 0; i < sblist_getsize (config->add_headers); i++) {
                 http_header_t *header = sblist_get (config->add_headers, i);
 
-                orderedmap_append (hashofheaders, header->name, header->value);
+                pseudomap_append (hashofheaders, header->name, header->value);
         }
 
         request = process_request (connptr, hashofheaders);
@@ -1762,10 +1822,10 @@ e401:
                         HC_FAIL();
                 }
         } else {
-                if (send_ssl_response (connptr) < 0) {
+                if (send_connect_method_response (connptr) < 0) {
                         log_message (LOG_ERR,
-                                     "handle_connection: Could not send SSL greeting "
-                                     "to client.");
+                                     "handle_connection: Could not send CONNECT"
+                                     " method greeting to client.");
                         update_stats (STAT_BADCONN);
                         HC_FAIL();
                 }
@@ -1780,7 +1840,7 @@ e401:
 
 done:
         free_request_struct (request);
-        orderedmap_destroy (hashofheaders);
+        pseudomap_destroy (hashofheaders);
         conn_destroy_contents (connptr);
         return;
 #undef HC_FAIL

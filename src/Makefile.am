@@ -50,7 +50,7 @@ tinyproxy_SOURCES = \
 	base64.c base64.h \
 	sblist.c sblist.h \
 	hsearch.c hsearch.h \
-	orderedmap.c orderedmap.h \
+	pseudomap.c pseudomap.h \
 	loop.c loop.h \
 	mypoll.c mypoll.h \
 	connect-ports.c connect-ports.h
@@ -67,5 +67,5 @@ conf-tokens-gperf.inc: conf-tokens.gperf
 	$(GPERF) $< > $@
 endif
 
-EXTRA_DIST = conf-tokens.gperf
+EXTRA_DIST = conf-tokens.gperf conf-tokens-gperf.inc
 
